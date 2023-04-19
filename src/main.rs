@@ -1,11 +1,13 @@
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-struct VecVecGraph {
-    vs: Vec<Vec<usize>>,
-}
+//struct VecVecGraph {
+//    vs: Vec<Vec<usize>>,
+//}
 
+/*
 impl VecVecGraph {
     fn new(num_vertices: usize) -> VecVecGraph {
         VecVecGraph {
@@ -22,33 +24,51 @@ impl VecVecGraph {
         self.vs[v2].push(v1);
     }
 }
+*/
 
-trait ParallelColorableGraph {
+struct CsrGraph {
+    vertices: Vec<usize>,
+    edges: Vec<usize>,
+}
+
+trait ParallelColorableGraph: Send + Sync {
     fn num_vertices(&self) -> usize;
     fn neighbors(&self, v: usize) -> &[usize];
-    fn degree(&self, v: usize) -> usize;
+    fn degree(&self, v: usize) -> usize {
+        self.neighbors(v).len()
+    }
     fn max_degree(&self) -> usize {
-        (0..self.num_vertices()).into_par_iter().max().unwrap_or(0)
+        (0..self.num_vertices())
+            .into_par_iter()
+            .map(|v| self.degree(v))
+            .max()
+            .unwrap_or(0)
     }
 }
 
-impl ParallelColorableGraph for &VecVecGraph {
+impl ParallelColorableGraph for &Vec<Vec<usize>> {
     fn num_vertices(&self) -> usize {
-        self.vs.len()
+        self.len()
     }
 
     fn neighbors(&self, v: usize) -> &[usize] {
-        &self.vs[v]
+        &self[v]
+    }
+}
+
+impl ParallelColorableGraph for &CsrGraph {
+    fn num_vertices(&self) -> usize {
+        self.vertices.len() - 1
     }
 
-    fn degree(&self, v: usize) -> usize {
-        self.vs[v].len()
+    fn neighbors(&self, v: usize) -> &[usize] {
+        &self.edges[self.vertices[v]..self.vertices[v + 1]]
     }
 }
 
 fn jones_plassmann<T>(graph: T, rho: &Vec<f64>) -> Vec<usize>
 where
-    T: ParallelColorableGraph + Send + Sync,
+    T: ParallelColorableGraph,
 {
     struct JPVertex {
         pred: Vec<usize>,
@@ -119,7 +139,7 @@ where
         .filter(|v| vs[*v].pred.len() == 0)
         .for_each(|v| jp_color(&vs, &colors, v));
 
-    // This should theoretically be compiled to a no-op
+    // This should be compiled to a no-op
     colors.into_iter().map(AtomicUsize::into_inner).collect()
 
     // ... but this is guaranteed :)
@@ -129,7 +149,7 @@ where
 
 fn check_coloring<T>(graph: T, coloring: &Vec<usize>)
 where
-    T: ParallelColorableGraph + Send + Sync,
+    T: ParallelColorableGraph,
 {
     let check = (0..graph.num_vertices()).into_par_iter().find_map_any(|v| {
         graph
@@ -148,13 +168,14 @@ where
     }
 }
 
-fn make_random_graph(n: usize, p: f64) -> VecVecGraph {
-    let mut graph = VecVecGraph::new(n);
+fn make_random_graph(n: usize, p: f64) -> Vec<Vec<usize>> {
+    let mut graph: Vec<_> = rayon::iter::repeatn(vec![], n).collect();
     let mut rng = rand::thread_rng();
     for i in 0..n {
         for j in i + 1..n {
             if rng.gen::<f64>() < p {
-                graph.add_edge(i, j);
+                graph[i].push(j);
+                graph[j].push(i);
             }
         }
     }
@@ -162,14 +183,159 @@ fn make_random_graph(n: usize, p: f64) -> VecVecGraph {
     graph
 }
 
-fn make_random_order(n: usize) -> Vec<f64> {
-    (0..n).into_par_iter().map(|_| rand::random()).collect()
+fn make_random_neighborhood_graph(n: usize, p: f64) -> Vec<Vec<usize>> {
+    let mut graph: Vec<_> = rayon::iter::repeatn(vec![], n).collect();
+    let mut rng = rand::thread_rng();
+    for i in 0..n {
+        for j in i + 1..n {
+            if rng.gen::<f64>() < p / ((j - i + 1) as f64).log2() {
+                graph[i].push(j);
+                graph[j].push(i);
+            }
+        }
+    }
+
+    graph
+}
+
+fn make_random_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    (0..graph.num_vertices())
+        .into_par_iter()
+        .map_init(|| rand::thread_rng(), |rng, _| rng.gen())
+        .collect()
+}
+
+fn make_lf_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    (0..graph.num_vertices())
+        .into_par_iter()
+        .map_init(
+            || rand::thread_rng(),
+            |rng, v| graph.degree(v) as f64 + rng.gen::<f64>(),
+        )
+        .collect()
+}
+
+fn make_llf_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    (0..graph.num_vertices())
+        .into_par_iter()
+        .map_init(
+            || rand::thread_rng(),
+            |rng, v| (graph.degree(v) as f64).log2().ceil() + rng.gen::<f64>(),
+        )
+        .collect()
+}
+
+fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    let mut rho: Vec<f64> = rayon::iter::repeatn(0.0, graph.num_vertices()).collect();
+
+    let degrees: Vec<AtomicUsize> = (0..graph.num_vertices())
+        .into_par_iter()
+        .map(|v| AtomicUsize::new(graph.degree(v)))
+        .collect();
+    for i in 0.. {
+        let threshold = degrees
+            .par_iter()
+            .map(|d| d.load(Ordering::Relaxed))
+            .min()
+            .unwrap_or(usize::MAX);
+
+        if threshold == usize::MAX {
+            break;
+        }
+
+        // TODO: use collect_into_vec to reuse rather than reallocate
+        let to_remove: Vec<bool> = degrees
+            .par_iter()
+            .map(|d| d.load(Ordering::Relaxed) <= threshold)
+            .collect();
+
+        rho.par_iter_mut().enumerate().for_each_init(
+            || rand::thread_rng(),
+            |rng, (v, r)| {
+                if to_remove[v] {
+                    *r = i as f64 + rng.gen::<f64>();
+
+                    degrees[v].store(usize::MAX, Ordering::Release);
+                    graph.neighbors(v).par_iter().for_each(|u| {
+                        if !to_remove[*u] && degrees[*u].load(Ordering::Acquire) != usize::MAX {
+                            degrees[*u].fetch_sub(1, Ordering::SeqCst);
+                        }
+                    });
+                }
+            },
+        );
+    }
+
+    rho
+}
+
+fn test_coloring<T, F>(graph: T, gen_order: F, num_rounds: usize)
+where
+    T: ParallelColorableGraph + Copy,
+    F: Fn(T) -> Vec<f64>,
+{
+    // Warmup
+    {
+        println!("Warmup Round");
+        println!("creating order...");
+        let ordering_start = Instant::now();
+        let ordering = gen_order(graph);
+        let ordering_dur = ordering_start.elapsed();
+        println!("finished in {}s", ordering_dur.as_secs_f64());
+
+        println!("coloring graph...");
+        let coloring_start = Instant::now();
+        let coloring = jones_plassmann(graph, &ordering);
+        let coloring_dur = coloring_start.elapsed();
+        println!("finished in {}s", coloring_dur.as_secs_f64());
+
+        println!("checking coloring...");
+        check_coloring(graph, &coloring);
+
+        let num_colors = coloring.par_iter().max().unwrap() + 1;
+        println!("found {} coloring", num_colors);
+    }
+
+    let mut tot_ordering_dur = Duration::new(0, 0);
+    let mut tot_coloring_dur = Duration::new(0, 0);
+
+    for i in 0..num_rounds {
+        println!("Round {}:", i + 1);
+        println!("creating order...");
+        let ordering_start = Instant::now();
+        let ordering = gen_order(graph);
+        let ordering_dur = ordering_start.elapsed();
+        println!("finished in {}s", ordering_dur.as_secs_f64());
+        tot_ordering_dur += ordering_dur;
+
+        println!("coloring graph...");
+        let coloring_start = Instant::now();
+        let coloring = jones_plassmann(graph, &ordering);
+        let coloring_dur = coloring_start.elapsed();
+        println!("finished in {}s", coloring_dur.as_secs_f64());
+        tot_coloring_dur += coloring_dur;
+
+        println!("checking coloring...");
+        check_coloring(graph, &coloring);
+
+        let num_colors = coloring.par_iter().max().unwrap() + 1;
+        println!("found {} coloring", num_colors);
+    }
+
+    println!(
+        "average ordering time: {}s",
+        tot_ordering_dur.as_secs_f64() / num_rounds as f64
+    );
+    println!(
+        "average coloring time: {}s",
+        tot_coloring_dur.as_secs_f64() / num_rounds as f64
+    );
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut n: usize = 1_000_000_000;
+    let mut n: usize = 1_000;
     let mut p: f64 = 0.1;
     let mut num_rounds = 3;
 
@@ -190,43 +356,26 @@ fn main() {
     println!("n = {0} p = {1} num_rounds = {2}", n, p, num_rounds);
 
     println!("building graph...");
-    let graph = make_random_graph(n, p);
+    let graph = make_random_neighborhood_graph(n, p);
 
-    println!("creating order...");
-    let ordering = make_random_order(n);
+    // Graph statistics
+    {
+        let degree_sum: usize = (0..n).into_par_iter().map(|i| (&graph).degree(i)).sum();
 
-    println!("coloring graph...");
-    let coloring = jones_plassmann(&graph, &ordering);
+        println!("edges: {}", degree_sum / 2);
+        println!("max degree: {}", (&graph).max_degree());
+        println!("average degree: {}", degree_sum as f64 / n as f64);
+    }
 
-    println!("checking coloring...");
-    check_coloring(&graph, &coloring);
+    println!("random ordering:");
+    test_coloring(&graph, make_random_order, num_rounds);
 
-    let num_colors = coloring.par_iter().max().unwrap() + 1;
-    println!("Found {} coloring", num_colors);
+    println!("largest degree first ordering:");
+    test_coloring(&graph, make_lf_order, num_rounds);
 
-    // Initializing in parallel, I think? (Hope)
-    //let vs: Vec<_> = (0..n).into_par_iter().collect();
+    println!("largest log degree first ordering:");
+    test_coloring(&graph, make_llf_order, num_rounds);
 
-    //{
-    //    let warmup_start = time::Instant::now();
-    //    let ans = do_reduce(&vs);
-    //    let warmup_dur = warmup_start.elapsed();
-    //    println!("Total sum: {}", ans);
-    //    println!("Warmup round running time: {}", warmup_dur.as_secs_f64());
-    //}
-
-    //let mut total_time = time::Duration::new(0, 0);
-    //for i in 0..num_rounds {
-    //    let start = time::Instant::now();
-    //    let _ans = do_reduce(&vs);
-    //    let dur = start.elapsed();
-
-    //    println!("Round {} running time: {}", i + 1, dur.as_secs_f64());
-    //    total_time += dur;
-    //}
-
-    //println!(
-    //    "Average running time: {}",
-    //    total_time.as_secs_f64() / num_rounds as f64
-    //);
+    println!("smallest degree last ordering:");
+    test_coloring(&graph, make_sl_order, num_rounds);
 }
