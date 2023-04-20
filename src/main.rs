@@ -2,6 +2,7 @@ use rand::prelude::*;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -256,6 +257,8 @@ fn make_llf_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
 }
 
 fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    let cutoff = true;
+
     let mut rho: Vec<_> = rayon::iter::repeatn(0.0, graph.num_vertices()).collect();
     let mut to_remove: Vec<bool> = rayon::iter::repeatn(false, graph.num_vertices()).collect();
 
@@ -263,6 +266,7 @@ fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
         .into_par_iter()
         .map(|v| AtomicUsize::new(graph.degree(v)))
         .collect();
+
     for i in 0.. {
         let threshold = degrees
             .par_iter()
@@ -273,6 +277,8 @@ fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
         if threshold == usize::MAX {
             break;
         }
+
+        let threshold = if cutoff { threshold.max(i) } else { threshold };
 
         degrees
             .par_iter()
@@ -297,6 +303,50 @@ fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
     }
 
     rho
+}
+
+fn make_sl_order_alt<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    let mut iters: Vec<Option<NonZeroUsize>> =
+        rayon::iter::repeatn(None, graph.num_vertices()).collect();
+    let mut degrees: Vec<usize> = Vec::with_capacity(graph.num_vertices());
+
+    for i in 1.. {
+        (0..graph.num_vertices())
+            .into_par_iter()
+            .map(|v| {
+                if iters[v] == None {
+                    graph
+                        .neighbors(v)
+                        .par_iter()
+                        .filter(|u| iters[**u] == None)
+                        .count()
+                } else {
+                    usize::MAX
+                }
+            })
+            .collect_into_vec(&mut degrees);
+
+        let threshold = *degrees.par_iter().min().unwrap_or(&usize::MAX);
+
+        if threshold == usize::MAX {
+            break;
+        }
+
+        iters.par_iter_mut().enumerate().for_each(|(v, r)| {
+            if *r == None && degrees[v] <= threshold {
+                *r = NonZeroUsize::new(i);
+            }
+        });
+    }
+
+    iters
+        .into_par_iter()
+        .map(|r| match r {
+            None => 0,
+            Some(v) => v.get(),
+        })
+        .map_init(|| rand::thread_rng(), |rng, v| v as f64 + rng.gen::<f64>())
+        .collect()
 }
 
 fn make_sll_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
@@ -389,8 +439,8 @@ where
         }
 
         let mut it = line.split("\t");
-        let v: usize = it.next().unwrap().parse().unwrap();
-        let u: usize = it.next().unwrap().parse().unwrap();
+        let v = it.next().unwrap().parse::<usize>().unwrap() - 1;
+        let u = it.next().unwrap().parse::<usize>().unwrap() - 1;
 
         if u >= graph.len() || v >= graph.len() {
             graph.resize(v.max(u) + 1, vec![]);
@@ -405,6 +455,8 @@ where
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // TODO: parse command line args to select graph and orderings
 
     /*
     let mut n: usize = 1_000;
@@ -435,7 +487,7 @@ fn main() -> io::Result<()> {
 
     //println!("building graph...");
     //let graph = make_random_graph(n, m);
-    //let graph = make_path_csr_graph(n);
+    //let graph = make_path_csr_graph(1_000_000);
 
     // Graph statistics
     {
