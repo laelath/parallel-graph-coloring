@@ -1,9 +1,10 @@
+use clap::{Args, Parser, ValueEnum};
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -193,7 +194,7 @@ fn make_path_graph(n: usize) -> Vec<Vec<usize>> {
         .collect()
 }
 
-fn make_path_csr_graph(n: usize) -> CsrGraph {
+fn _make_path_csr_graph(n: usize) -> CsrGraph {
     if n == 0 {
         CsrGraph {
             vertices: vec![0],
@@ -305,7 +306,7 @@ fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
     rho
 }
 
-fn make_sl_order_alt<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+fn _make_sl_order_alt<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
     let mut iters: Vec<Option<NonZeroUsize>> =
         rayon::iter::repeatn(None, graph.num_vertices()).collect();
     let mut degrees: Vec<usize> = Vec::with_capacity(graph.num_vertices());
@@ -349,7 +350,7 @@ fn make_sl_order_alt<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
         .collect()
 }
 
-fn make_sll_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+fn make_sll_order<T: ParallelColorableGraph>(_graph: T) -> Vec<f64> {
     todo!()
 }
 
@@ -453,41 +454,71 @@ where
     Ok(graph)
 }
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Ordering methods to use
+    #[arg(short, long)]
+    order: Vec<OrderingMode>,
+
+    #[command(flatten)]
+    graph: GraphType,
+
+    /// Number of vertices
+    #[arg(long, default_value_t = 0)]
+    vertices: usize,
+
+    /// Average number of edges per vertex
+    #[arg(long, default_value_t = 0)]
+    edges: usize,
+
+    /// Number of times to run each coloring algorithm
+    #[arg(short, long, default_value_t = 3)]
+    rounds: usize,
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct GraphType {
+    /// Load a graph from a txt file
+    #[arg(short, long, value_name = "FILE")]
+    load: Option<PathBuf>,
+
+    /// Create a random graph
+    #[arg(long, requires = "vertices", requires = "edges")]
+    random_graph: bool,
+
+    /// Create a path graph
+    #[arg(long, requires = "vertices")]
+    path_graph: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum OrderingMode {
+    Rand,
+    LF,
+    SL,
+    LLF,
+    SLL,
+}
+
 fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let args = Cli::parse();
+
+    let graph = if let Some(path) = args.graph.load {
+        println!("loading graph...");
+        load_graph(path)?
+    } else if args.graph.random_graph {
+        println!("building random graph...");
+        make_random_graph(args.vertices, args.edges)
+    } else if args.graph.path_graph {
+        println!("building path graph...");
+        make_path_graph(args.vertices)
+    } else {
+        panic!()
+    };
 
     // TODO: parse command line args to select graph and orderings
-
-    /*
-    let mut n: usize = 1_000;
-    let mut m: usize = 10;
-    let mut num_rounds = 3;
-
-    if args.len() >= 2 {
-        n = args[1].parse().unwrap();
-    }
-    if args.len() >= 3 {
-        m = args[2].parse().unwrap();
-    }
-    if args.len() >= 4 {
-        num_rounds = args[3].parse().unwrap();
-    }
-
-    let n = n;
-    let m = m;
-    let num_rounds = num_rounds;
-
-    println!("n = {0} m = {1} num_rounds = {2}", n, m, num_rounds);
-    */
-
-    let num_rounds = 3;
-
-    println!("loading graph...");
-    let graph = load_graph(&args[1])?;
-
-    //println!("building graph...");
-    //let graph = make_random_graph(n, m);
-    //let graph = make_path_csr_graph(1_000_000);
 
     // Graph statistics
     {
@@ -505,21 +536,19 @@ fn main() -> io::Result<()> {
         println!("average degree: {}", degree_sum as f64 / n as f64);
     }
 
-    println!();
-    println!("random ordering:");
-    test_coloring(&graph, make_random_order, num_rounds);
+    for m in args.order.iter() {
+        println!();
+        println!("ordering mode: {:?}", m);
+        let f = match m {
+            OrderingMode::Rand => make_random_order,
+            OrderingMode::LF => make_lf_order,
+            OrderingMode::SL => make_sl_order,
+            OrderingMode::LLF => make_llf_order,
+            OrderingMode::SLL => make_sll_order,
+        };
 
-    println!();
-    println!("largest degree first ordering:");
-    test_coloring(&graph, make_lf_order, num_rounds);
-
-    println!();
-    println!("largest log degree first ordering:");
-    test_coloring(&graph, make_llf_order, num_rounds);
-
-    println!();
-    println!("smallest degree last ordering:");
-    test_coloring(&graph, make_sl_order, num_rounds);
+        test_coloring(&graph, f, args.rounds);
+    }
 
     Ok(())
 }
