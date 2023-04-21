@@ -53,52 +53,63 @@ where
     T: ParallelColorableGraph,
     W: PartialOrd + Send + Sync,
 {
-    fn jp_get_color<T, W>(graph: T, rho: &Vec<W>, colors: &Vec<AtomicUsize>, v: usize) -> usize
+    struct JPData {
+        colors: Vec<AtomicUsize>,
+        color_masks: Vec<AtomicUsize>,
+        counters: Vec<AtomicUsize>,
+    }
+    fn jp_get_color<T, W>(graph: T, rho: &Vec<W>, data: &JPData, v: usize) -> usize
     where
         T: ParallelColorableGraph,
         W: PartialOrd + Send + Sync,
     {
-        let avail_colors: Vec<AtomicUsize> = (0..graph.degree(v) + 1)
-            .into_par_iter()
-            .map(AtomicUsize::new)
-            .collect();
+        let mask = data.color_masks[v].load(Ordering::Acquire);
+        if mask.count_zeros() > 0 {
+            mask.trailing_ones() as usize
+        } else {
+            let avail_colors: Vec<AtomicUsize> = (usize::BITS as usize..graph.degree(v) + 1)
+                .into_par_iter()
+                .map(AtomicUsize::new)
+                .collect();
 
-        graph
-            .neighbors(v)
-            .par_iter()
-            .filter(|u| rho[**u] > rho[v])
-            .for_each(|u| {
-                let color = colors[*u].load(Ordering::Acquire);
-                if let Some(c) = avail_colors.get(color) {
-                    c.store(usize::MAX, Ordering::Relaxed);
-                }
-            });
+            graph
+                .neighbors(v)
+                .par_iter()
+                .filter(|u| rho[**u] > rho[v])
+                .for_each(|u| {
+                    let color = data.colors[*u].load(Ordering::Acquire);
+                    if color >= usize::BITS as usize {
+                        if let Some(c) = avail_colors.get(color - usize::BITS as usize) {
+                            c.store(usize::MAX, Ordering::Relaxed);
+                        }
+                    }
+                });
 
-        avail_colors
-            .into_par_iter()
-            .map(AtomicUsize::into_inner)
-            .min()
-            .unwrap()
+            avail_colors
+                .into_par_iter()
+                .map(AtomicUsize::into_inner)
+                .min()
+                .unwrap()
+        }
     }
 
-    fn jp_color<T, W>(
-        graph: T,
-        rho: &Vec<W>,
-        colors: &Vec<AtomicUsize>,
-        counters: &Vec<AtomicUsize>,
-        v: usize,
-    ) where
+    fn jp_color<T, W>(graph: T, rho: &Vec<W>, data: &JPData, v: usize)
+    where
         T: ParallelColorableGraph,
         W: PartialOrd + Send + Sync,
     {
-        colors[v].store(jp_get_color(graph, rho, colors, v), Ordering::Release);
+        let color = jp_get_color(graph, rho, data, v);
+        data.colors[v].store(color, Ordering::Release);
         graph
             .neighbors(v)
             .par_iter()
             .filter(|u| rho[**u] < rho[v])
             .for_each(|u| {
-                if counters[*u].fetch_sub(1, Ordering::SeqCst) == 1 {
-                    jp_color(graph, rho, colors, counters, *u);
+                if let Some(mask) = 1_usize.checked_shl(color as u32) {
+                    data.color_masks[*u].fetch_or(mask, Ordering::SeqCst);
+                }
+                if data.counters[*u].fetch_sub(1, Ordering::SeqCst) == 1 {
+                    jp_color(graph, rho, data, *u);
                 }
             });
     }
@@ -108,6 +119,11 @@ where
     let colors: Vec<AtomicUsize> = (0..graph.num_vertices())
         .into_par_iter()
         .map(|i| AtomicUsize::new(i))
+        .collect();
+
+    let color_masks: Vec<AtomicUsize> = (0..graph.num_vertices())
+        .into_par_iter()
+        .map(|_| AtomicUsize::new(0))
         .collect();
 
     let counters: Vec<AtomicUsize> = (0..graph.num_vertices())
@@ -123,6 +139,12 @@ where
         })
         .collect();
 
+    let data = JPData {
+        colors,
+        color_masks,
+        counters,
+    };
+
     (0..graph.num_vertices())
         .into_par_iter()
         .filter(|v| {
@@ -133,10 +155,13 @@ where
                 .count()
                 == 0
         })
-        .for_each(|v| jp_color(graph, rho, &colors, &counters, v));
+        .for_each(|v| jp_color(graph, rho, &data, v));
 
     // This should be compiled to a no-op
-    colors.into_iter().map(AtomicUsize::into_inner).collect()
+    data.colors
+        .into_iter()
+        .map(AtomicUsize::into_inner)
+        .collect()
 }
 
 fn check_coloring<T>(graph: T, coloring: &Vec<usize>)
@@ -440,8 +465,8 @@ where
         }
 
         let mut it = line.split("\t");
-        let v = it.next().unwrap().parse::<usize>().unwrap() - 1;
-        let u = it.next().unwrap().parse::<usize>().unwrap() - 1;
+        let v = it.next().unwrap().parse::<usize>().unwrap();
+        let u = it.next().unwrap().parse::<usize>().unwrap();
 
         if u >= graph.len() || v >= graph.len() {
             graph.resize(v.max(u) + 1, vec![]);
@@ -517,8 +542,6 @@ fn main() -> io::Result<()> {
     } else {
         panic!()
     };
-
-    // TODO: parse command line args to select graph and orderings
 
     // Graph statistics
     {
