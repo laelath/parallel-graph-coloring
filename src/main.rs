@@ -13,6 +13,21 @@ struct CsrGraph {
     edges: Vec<usize>,
 }
 
+impl CsrGraph {
+    fn from_vec_vec(graph: Vec<Vec<usize>>) -> Self {
+        let mut vertices = Vec::with_capacity(graph.len() + 1);
+        let mut edges = vec![];
+
+        for v in graph.into_iter() {
+            vertices.push(edges.len());
+            edges.extend_from_slice(&v);
+        }
+
+        vertices.push(edges.len());
+        Self { vertices, edges }
+    }
+}
+
 trait ParallelColorableGraph: Copy + Send + Sync {
     fn num_vertices(&self) -> usize;
     fn neighbors(&self, v: usize) -> &[usize];
@@ -542,6 +557,9 @@ fn main() -> io::Result<()> {
     } else {
         panic!()
     };
+
+    println!("converting to csr...");
+    let graph = CsrGraph::from_vec_vec(graph);
 
     // Graph statistics
     {
