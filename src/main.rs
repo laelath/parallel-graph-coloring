@@ -299,6 +299,7 @@ fn make_llf_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
 
 fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
     let cutoff = true;
+    let rounds = 10;
 
     let mut rho: Vec<_> = rayon::iter::repeatn(0.0, graph.num_vertices()).collect();
     let mut to_remove: Vec<bool> = rayon::iter::repeatn(false, graph.num_vertices()).collect();
@@ -319,7 +320,11 @@ fn make_sl_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
             break;
         }
 
-        let threshold = if cutoff { threshold.max(i) } else { threshold };
+        let threshold = if cutoff {
+            threshold.max(i / rounds)
+        } else {
+            threshold
+        };
 
         degrees
             .par_iter()
@@ -390,8 +395,47 @@ fn _make_sl_order_alt<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
         .collect()
 }
 
-fn make_sll_order<T: ParallelColorableGraph>(_graph: T) -> Vec<f64> {
-    todo!()
+fn make_sll_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
+    let rounds = 10;
+
+    let mut i = 1;
+
+    let mut rho: Vec<_> = rayon::iter::repeatn(0.0, graph.num_vertices()).collect();
+    let mut to_remove: Vec<bool> = rayon::iter::repeatn(false, graph.num_vertices()).collect();
+
+    let degrees: Vec<AtomicUsize> = (0..graph.num_vertices())
+        .into_par_iter()
+        .map(|v| AtomicUsize::new(graph.degree(v)))
+        .collect();
+
+    for d in 0..graph.max_degree().ilog2() + 1 {
+        for _ in 0..rounds {
+            degrees
+                .par_iter()
+                .map(|i| i.load(Ordering::Relaxed) <= 1_usize.wrapping_shl(d))
+                .collect_into_vec(&mut to_remove);
+
+            rho.par_iter_mut().enumerate().for_each_init(
+                || rand::thread_rng(),
+                |rng, (v, r)| {
+                    if to_remove[v] {
+                        *r = i as f64 + rng.gen::<f64>();
+
+                        degrees[v].store(usize::MAX, Ordering::Release);
+                        graph.neighbors(v).par_iter().for_each(|u| {
+                            if !to_remove[*u] && degrees[*u].load(Ordering::Acquire) != usize::MAX {
+                                degrees[*u].fetch_sub(1, Ordering::SeqCst);
+                            }
+                        });
+                    }
+                },
+            );
+
+            i += 1;
+        }
+    }
+
+    rho
 }
 
 fn test_coloring<T, W, F>(graph: T, gen_order: F, num_rounds: usize)
