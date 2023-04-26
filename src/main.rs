@@ -117,21 +117,17 @@ impl<'a> ParallelColorableGraph for &'a CsrGraph<usize> {
     }
 
     fn par_iter_vertices(&self) -> Self::VertexIter {
-        (0..usize::try_from(self.vertices.len() - 1).unwrap()).into_par_iter()
+        (0..self.vertices.len() - 1).into_par_iter()
     }
 
     fn par_iter_neighbors(&self, v: usize) -> Self::NeighborIter {
-        let o: usize = v.try_into().unwrap();
-        let v1: usize = self.vertices[o].try_into().unwrap();
-        let v2: usize = self.vertices[o + 1].try_into().unwrap();
-        self.edges[v1..v2].par_iter().copied()
+        self.edges[self.vertices[v]..self.vertices[v + 1]]
+            .par_iter()
+            .copied()
     }
 
     fn degree(&self, v: usize) -> usize {
-        let o: usize = v.try_into().unwrap();
-        (self.vertices[o + 1] - self.vertices[o])
-            .try_into()
-            .unwrap()
+        self.vertices[v + 1] - self.vertices[v]
     }
 }
 
