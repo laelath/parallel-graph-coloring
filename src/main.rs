@@ -523,7 +523,7 @@ where
             continue;
         }
 
-        let mut it = line.split("\t");
+        let mut it = line.split_whitespace();
         let v = it.next().unwrap().parse::<usize>().unwrap();
         let u = it.next().unwrap().parse::<usize>().unwrap();
 
