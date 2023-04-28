@@ -8,22 +8,48 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+struct VecVecGraph<T: TryInto<usize>> {
+    vv: Vec<Vec<T>>,
+    n_edges: usize,
+}
+
+impl<T: TryInto<usize> + PartialEq + Copy> VecVecGraph<T>
+where
+    <T as TryInto<usize>>::Error: std::fmt::Debug,
+{
+    fn add_edge(&mut self, u: T, v: T) {
+        let uu = u.try_into().unwrap();
+        let vv = v.try_into().unwrap();
+        if uu == vv {
+            panic!("Tried to add self edge");
+        } else if !self.vv[uu].contains(&v) {
+            self.vv[uu].push(v);
+            self.vv[vv].push(u);
+            self.n_edges += 1;
+        }
+    }
+}
+
 struct CsrGraph<T: TryInto<usize>> {
     vertices: Vec<T>,
     edges: Vec<T>,
 }
 
-impl<T: TryInto<usize> + TryFrom<usize>> CsrGraph<T>
+impl<T> CsrGraph<T>
 where
+    T: TryInto<usize> + TryFrom<usize>,
     <T as TryFrom<usize>>::Error: std::fmt::Debug,
 {
-    fn from_vec_vec(graph: Vec<Vec<usize>>) -> Self {
-        let mut vertices: Vec<T> = Vec::with_capacity(graph.len() + 1);
-        let mut edges: Vec<T> = vec![];
+    fn from_vec_vec<U>(graph: VecVecGraph<U>) -> Self
+    where
+        U: TryInto<T> + TryInto<usize>,
+        <U as TryInto<T>>::Error: std::fmt::Debug,
+    {
+        let mut vertices: Vec<T> = Vec::with_capacity(graph.vv.len() + 1);
+        let mut edges: Vec<T> = Vec::with_capacity(graph.n_edges * 2);
 
-        for v in graph.into_iter() {
+        for v in graph.vv.into_iter() {
             vertices.push(edges.len().try_into().unwrap());
-            edges.reserve(v.len());
             v.into_iter()
                 .for_each(|v| edges.push(v.try_into().unwrap()));
         }
@@ -57,25 +83,25 @@ trait ParallelColorableGraph: Copy + Send + Sync {
     }
 }
 
-impl<'a> ParallelColorableGraph for &'a Vec<Vec<usize>> {
+impl<'a> ParallelColorableGraph for &'a VecVecGraph<usize> {
     type T = usize;
     type VertexIter = rayon::range::Iter<usize>;
     type NeighborIter = rayon::iter::Copied<rayon::slice::Iter<'a, usize>>;
 
     fn num_vertices(&self) -> usize {
-        self.len()
+        self.vv.len()
     }
 
     fn par_iter_vertices(&self) -> Self::VertexIter {
-        (0..self.len()).into_par_iter()
+        (0..self.vv.len()).into_par_iter()
     }
 
     fn par_iter_neighbors(&self, v: usize) -> Self::NeighborIter {
-        self[v].par_iter().copied()
+        self.vv[v].par_iter().copied()
     }
 
     fn degree(&self, v: usize) -> usize {
-        self[v].len()
+        self.vv[v].len()
     }
 }
 
@@ -265,38 +291,51 @@ where
     }
 }
 
-fn make_random_graph(n: usize, m: usize) -> Vec<Vec<usize>> {
+fn make_random_graph<T>(n: usize, m: usize) -> VecVecGraph<T>
+where
+    T: Copy + Send + PartialEq + TryFrom<usize> + TryInto<usize>,
+    <T as TryFrom<usize>>::Error: std::fmt::Debug,
+    <T as TryInto<usize>>::Error: std::fmt::Debug,
+{
     let mut rng = rand::thread_rng();
-    let mut graph: Vec<_> = rayon::iter::repeatn(vec![], n).collect();
 
-    for v in 0..n {
+    let vv: Vec<_> = rayon::iter::repeatn(vec![], n).collect();
+    let mut graph = VecVecGraph { vv, n_edges: 0 };
+
+    for vv in 0..n {
+        let v = vv.try_into().unwrap();
         for _ in 0..rng.gen_range(0..m) {
-            let u = rng.gen_range(0..n);
-            if u != v && !graph[v].contains(&u) {
-                graph[v].push(u);
-                graph[u].push(v);
-            }
+            let uu = rng.gen_range(0..n);
+            let u = uu.try_into().unwrap();
+            graph.add_edge(v, u);
         }
     }
 
     graph
 }
 
-fn make_path_graph(n: usize) -> Vec<Vec<usize>> {
-    (0..n)
-        .into_par_iter()
-        .map(|i| {
-            if n == 0 {
-                vec![]
-            } else if i == 0 {
-                vec![1]
-            } else if i == n - 1 {
-                vec![i - 1]
-            } else {
-                vec![i - 1, i + 1]
-            }
-        })
-        .collect()
+fn make_path_graph<T>(n: usize) -> VecVecGraph<T>
+where
+    T: Copy + Send + PartialEq + TryFrom<usize> + TryInto<usize>,
+    <T as TryFrom<usize>>::Error: std::fmt::Debug,
+{
+    VecVecGraph {
+        vv: (0..n)
+            .into_par_iter()
+            .map(|i| {
+                if n == 0 {
+                    vec![]
+                } else if i == 0 {
+                    vec![1.try_into().unwrap()]
+                } else if i == n - 1 {
+                    vec![(i - 1).try_into().unwrap()]
+                } else {
+                    vec![(i - 1).try_into().unwrap(), (i + 1).try_into().unwrap()]
+                }
+            })
+            .collect(),
+        n_edges: if n == 0 { 0 } else { n - 1 },
+    }
 }
 
 fn make_random_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
@@ -540,11 +579,15 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn load_graph<P>(filename: P) -> io::Result<Vec<Vec<usize>>>
+fn load_graph<T, P>(filename: P) -> io::Result<VecVecGraph<T>>
 where
+    T: Copy + std::str::FromStr + TryInto<usize>,
+    <T as std::str::FromStr>::Err: std::fmt::Debug,
+    <T as TryInto<usize>>::Error: std::fmt::Debug,
     P: AsRef<Path>,
 {
-    let mut graph = Vec::new();
+    let mut graph_vec = Vec::new();
+    let mut n_edges = 0;
 
     let lines = read_lines(filename)?;
     for line in lines {
@@ -554,18 +597,25 @@ where
         }
 
         let mut it = line.split_whitespace();
-        let v = it.next().unwrap().parse::<usize>().unwrap();
-        let u = it.next().unwrap().parse::<usize>().unwrap();
+        let v = it.next().unwrap().parse::<T>().unwrap();
+        let u = it.next().unwrap().parse::<T>().unwrap();
 
-        if u >= graph.len() || v >= graph.len() {
-            graph.resize(v.max(u) + 1, vec![]);
+        let vv = v.try_into().unwrap();
+        let uu = u.try_into().unwrap();
+        if uu >= graph_vec.len() || vv >= graph_vec.len() {
+            graph_vec.resize(vv.max(uu) + 1, vec![]);
         }
 
-        graph[v].push(u);
-        graph[u].push(v);
+        graph_vec[vv].push(u);
+        graph_vec[uu].push(v);
+
+        n_edges += 1;
     }
 
-    Ok(graph)
+    Ok(VecVecGraph {
+        vv: graph_vec,
+        n_edges,
+    })
 }
 
 #[derive(Parser)]
@@ -619,7 +669,7 @@ enum OrderingMode {
 fn main() -> io::Result<()> {
     let args = Cli::parse();
 
-    let graph = if let Some(path) = args.graph.load {
+    let graph: VecVecGraph<u32> = if let Some(path) = args.graph.load {
         println!("loading graph...");
         load_graph(path)?
     } else if args.graph.random_graph {
