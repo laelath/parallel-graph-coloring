@@ -59,21 +59,15 @@ where
     }
 }
 
-trait ParallelColorableGraph: Copy + Send + Sync {
+trait SerialColorableGraph: Copy {
     type T: Copy + Send + Sync + TryFrom<usize> + TryInto<usize>;
-    type VertexIter: rayon::iter::IndexedParallelIterator<Item = Self::T>;
-    type NeighborIter: rayon::iter::IndexedParallelIterator<Item = Self::T>;
+    type VertexIter: std::iter::Iterator<Item = Self::T>;
+    type NeighborIter: std::iter::Iterator<Item = Self::T>;
 
     fn num_vertices(&self) -> usize;
-    fn par_iter_vertices(&self) -> Self::VertexIter;
-    fn par_iter_neighbors(&self, v: Self::T) -> Self::NeighborIter;
+    fn iter_vertices(&self) -> Self::VertexIter;
+    fn iter_neighbors(&self, v: Self::T) -> Self::NeighborIter;
     fn degree(&self, v: Self::T) -> usize;
-    fn max_degree(&self) -> usize {
-        self.par_iter_vertices()
-            .map(|v| self.degree(v))
-            .max()
-            .unwrap_or(0)
-    }
 
     fn to_index(v: Self::T) -> usize {
         v.try_into().unwrap_or_else(|_| panic!())
@@ -83,21 +77,21 @@ trait ParallelColorableGraph: Copy + Send + Sync {
     }
 }
 
-impl<'a> ParallelColorableGraph for &'a VecVecGraph<usize> {
+impl<'a> SerialColorableGraph for &'a VecVecGraph<usize> {
     type T = usize;
-    type VertexIter = rayon::range::Iter<usize>;
-    type NeighborIter = rayon::iter::Copied<rayon::slice::Iter<'a, usize>>;
+    type VertexIter = std::ops::Range<usize>;
+    type NeighborIter = std::iter::Copied<std::slice::Iter<'a, usize>>;
 
     fn num_vertices(&self) -> usize {
         self.vv.len()
     }
 
-    fn par_iter_vertices(&self) -> Self::VertexIter {
-        (0..self.vv.len()).into_par_iter()
+    fn iter_vertices(&self) -> Self::VertexIter {
+        (0..self.vv.len()).into_iter()
     }
 
-    fn par_iter_neighbors(&self, v: usize) -> Self::NeighborIter {
-        self.vv[v].par_iter().copied()
+    fn iter_neighbors(&self, v: usize) -> Self::NeighborIter {
+        self.vv[v].iter().copied()
     }
 
     fn degree(&self, v: usize) -> usize {
@@ -105,24 +99,24 @@ impl<'a> ParallelColorableGraph for &'a VecVecGraph<usize> {
     }
 }
 
-impl<'a> ParallelColorableGraph for &'a CsrGraph<u32> {
+impl<'a> SerialColorableGraph for &'a CsrGraph<u32> {
     type T = u32;
-    type VertexIter = rayon::range::Iter<u32>;
-    type NeighborIter = rayon::iter::Copied<rayon::slice::Iter<'a, u32>>;
+    type VertexIter = std::ops::Range<u32>;
+    type NeighborIter = std::iter::Copied<std::slice::Iter<'a, u32>>;
 
     fn num_vertices(&self) -> usize {
         self.vertices.len() - 1
     }
 
-    fn par_iter_vertices(&self) -> Self::VertexIter {
-        (0..u32::try_from(self.vertices.len() - 1).unwrap()).into_par_iter()
+    fn iter_vertices(&self) -> Self::VertexIter {
+        (0..u32::try_from(self.vertices.len() - 1).unwrap()).into_iter()
     }
 
-    fn par_iter_neighbors(&self, v: u32) -> Self::NeighborIter {
+    fn iter_neighbors(&self, v: u32) -> Self::NeighborIter {
         let o: usize = v.try_into().unwrap();
         let v1: usize = self.vertices[o].try_into().unwrap();
         let v2: usize = self.vertices[o + 1].try_into().unwrap();
-        self.edges[v1..v2].par_iter().copied()
+        self.edges[v1..v2].iter().copied()
     }
 
     fn degree(&self, v: u32) -> usize {
@@ -133,27 +127,97 @@ impl<'a> ParallelColorableGraph for &'a CsrGraph<u32> {
     }
 }
 
-impl<'a> ParallelColorableGraph for &'a CsrGraph<usize> {
+impl<'a> SerialColorableGraph for &'a CsrGraph<usize> {
     type T = usize;
-    type VertexIter = rayon::range::Iter<usize>;
-    type NeighborIter = rayon::iter::Copied<rayon::slice::Iter<'a, usize>>;
+    type VertexIter = std::ops::Range<usize>;
+    type NeighborIter = std::iter::Copied<std::slice::Iter<'a, usize>>;
 
     fn num_vertices(&self) -> usize {
         self.vertices.len() - 1
     }
 
-    fn par_iter_vertices(&self) -> Self::VertexIter {
-        (0..self.vertices.len() - 1).into_par_iter()
+    fn iter_vertices(&self) -> Self::VertexIter {
+        (0..self.vertices.len() - 1).into_iter()
     }
 
-    fn par_iter_neighbors(&self, v: usize) -> Self::NeighborIter {
+    fn iter_neighbors(&self, v: usize) -> Self::NeighborIter {
         self.edges[self.vertices[v]..self.vertices[v + 1]]
-            .par_iter()
+            .iter()
             .copied()
     }
 
     fn degree(&self, v: usize) -> usize {
         self.vertices[v + 1] - self.vertices[v]
+    }
+}
+
+trait ParallelColorableGraph: SerialColorableGraph + Send + Sync {
+    //type T: Copy + Send + Sync + TryFrom<usize> + TryInto<usize>;
+    type VertexParIter: rayon::iter::IndexedParallelIterator<Item = Self::T>;
+    type NeighborParIter: rayon::iter::IndexedParallelIterator<Item = Self::T>;
+
+    //fn num_vertices(&self) -> usize;
+    fn par_iter_vertices(&self) -> Self::VertexParIter;
+    fn par_iter_neighbors(&self, v: Self::T) -> Self::NeighborParIter;
+    //fn degree(&self, v: Self::T) -> usize;
+    fn max_degree(&self) -> usize {
+        self.par_iter_vertices()
+            .map(|v| self.degree(v))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /*
+    fn to_index(v: Self::T) -> usize {
+        v.try_into().unwrap_or_else(|_| panic!())
+    }
+    fn from_index(v: usize) -> Self::T {
+        v.try_into().unwrap_or_else(|_| panic!())
+    }
+    */
+}
+
+impl<'a> ParallelColorableGraph for &'a VecVecGraph<usize> {
+    type VertexParIter = rayon::range::Iter<usize>;
+    type NeighborParIter = rayon::iter::Copied<rayon::slice::Iter<'a, usize>>;
+
+    fn par_iter_vertices(&self) -> Self::VertexParIter {
+        (0..self.vv.len()).into_par_iter()
+    }
+
+    fn par_iter_neighbors(&self, v: usize) -> Self::NeighborParIter {
+        self.vv[v].par_iter().copied()
+    }
+}
+
+impl<'a> ParallelColorableGraph for &'a CsrGraph<u32> {
+    type VertexParIter = rayon::range::Iter<u32>;
+    type NeighborParIter = rayon::iter::Copied<rayon::slice::Iter<'a, u32>>;
+
+    fn par_iter_vertices(&self) -> Self::VertexParIter {
+        (0..u32::try_from(self.vertices.len() - 1).unwrap()).into_par_iter()
+    }
+
+    fn par_iter_neighbors(&self, v: u32) -> Self::NeighborParIter {
+        let o: usize = v.try_into().unwrap();
+        let v1: usize = self.vertices[o].try_into().unwrap();
+        let v2: usize = self.vertices[o + 1].try_into().unwrap();
+        self.edges[v1..v2].par_iter().copied()
+    }
+}
+
+impl<'a> ParallelColorableGraph for &'a CsrGraph<usize> {
+    type VertexParIter = rayon::range::Iter<usize>;
+    type NeighborParIter = rayon::iter::Copied<rayon::slice::Iter<'a, usize>>;
+
+    fn par_iter_vertices(&self) -> Self::VertexParIter {
+        (0..self.vertices.len() - 1).into_par_iter()
+    }
+
+    fn par_iter_neighbors(&self, v: usize) -> Self::NeighborParIter {
+        self.edges[self.vertices[v]..self.vertices[v + 1]]
+            .par_iter()
+            .copied()
     }
 }
 
@@ -267,6 +331,34 @@ where
         .into_iter()
         .map(AtomicUsize::into_inner)
         .collect()
+}
+
+fn color_serial<SCG, W>(graph: SCG, rho: &Vec<W>) -> Vec<usize>
+where
+    SCG: SerialColorableGraph,
+    W: PartialOrd + Copy,
+{
+    let mut visited = vec![false; rho.len()];
+    let mut order: Vec<_> = (0..rho.len()).collect();
+    order.sort_by(|i, j| rho[*j].partial_cmp(&rho[*i]).unwrap());
+
+    let mut colors = vec![0; rho.len()];
+
+    for i in order.into_iter() {
+        let v = SCG::from_index(i);
+        let mut seen = vec![false; graph.degree(v) + 1];
+        for u in graph.iter_neighbors(v) {
+            let j = SCG::to_index(u);
+            if visited[j] && colors[j] < seen.len() {
+                seen[colors[j]] = true;
+            }
+        }
+        let color = seen.iter().position(|b| !*b).unwrap();
+        colors[i] = color;
+        visited[i] = true;
+    }
+
+    colors
 }
 
 fn check_coloring<T>(graph: T, coloring: &Vec<usize>)
@@ -507,58 +599,53 @@ fn make_sll_order<T: ParallelColorableGraph>(graph: T) -> Vec<f64> {
     rho
 }
 
-fn test_coloring<T, W, F>(graph: T, gen_order: F, num_rounds: usize)
+fn test_coloring<T, W, F>(graph: T, gen_order: F, alg: ColorAlg, num_rounds: usize)
 where
     T: ParallelColorableGraph + Copy,
-    W: PartialOrd + Send + Sync,
+    W: PartialOrd + Copy + Send + Sync,
     F: Fn(T) -> Vec<W>,
 {
-    // Warmup
-    {
-        println!("Warmup Round");
-        println!("creating order...");
-        let ordering_start = Instant::now();
-        let ordering = gen_order(graph);
-        let ordering_dur = ordering_start.elapsed();
-        println!("finished in {}s", ordering_dur.as_secs_f64());
-
-        println!("coloring graph...");
-        let coloring_start = Instant::now();
-        let coloring = jones_plassmann(graph, &ordering);
-        let coloring_dur = coloring_start.elapsed();
-        println!("finished in {}s", coloring_dur.as_secs_f64());
-
-        println!("checking coloring...");
-        check_coloring(graph, &coloring);
-
-        let num_colors = coloring.par_iter().max().unwrap() + 1;
-        println!("found {} coloring", num_colors);
-    }
+    let run_color = |ordering: Vec<W>| match alg {
+        ColorAlg::JP => jones_plassmann(graph, &ordering),
+        ColorAlg::Serial => color_serial(graph, &ordering),
+    };
 
     let mut tot_ordering_dur = Duration::new(0, 0);
     let mut tot_coloring_dur = Duration::new(0, 0);
 
-    for i in 0..num_rounds {
-        println!("Round {}:", i + 1);
+    let mut do_round = |t| {
         println!("creating order...");
         let ordering_start = Instant::now();
         let ordering = gen_order(graph);
         let ordering_dur = ordering_start.elapsed();
         println!("finished in {}s", ordering_dur.as_secs_f64());
-        tot_ordering_dur += ordering_dur;
+        if t {
+            tot_ordering_dur += ordering_dur;
+        }
 
         println!("coloring graph...");
         let coloring_start = Instant::now();
-        let coloring = jones_plassmann(graph, &ordering);
+        let coloring = run_color(ordering);
         let coloring_dur = coloring_start.elapsed();
         println!("finished in {}s", coloring_dur.as_secs_f64());
-        tot_coloring_dur += coloring_dur;
+        if t {
+            tot_coloring_dur += coloring_dur;
+        }
 
         println!("checking coloring...");
         check_coloring(graph, &coloring);
 
         let num_colors = coloring.par_iter().max().unwrap() + 1;
         println!("found {} coloring", num_colors);
+    };
+
+    // Warmup
+    println!("Warmup Round");
+    do_round(false);
+
+    for i in 0..num_rounds {
+        println!("Round {}:", i + 1);
+        do_round(true);
     }
 
     println!(
@@ -628,6 +715,9 @@ struct Cli {
     #[command(flatten)]
     graph: GraphType,
 
+    #[arg(long, default_value_t = ColorAlg::JP)]
+    alg: ColorAlg,
+
     /// Number of vertices
     #[arg(long, default_value_t = 0)]
     vertices: usize,
@@ -664,6 +754,21 @@ enum OrderingMode {
     SL,
     LLF,
     SLL,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
+enum ColorAlg {
+    JP,
+    Serial,
+}
+
+impl std::fmt::Display for ColorAlg {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ColorAlg::JP => write!(f, "jp"),
+            ColorAlg::Serial => write!(f, "serial"),
+        }
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -715,7 +820,7 @@ fn main() -> io::Result<()> {
             OrderingMode::SLL => make_sll_order,
         };
 
-        test_coloring(&graph, f, args.rounds);
+        test_coloring(&graph, f, args.alg, args.rounds);
     }
 
     Ok(())
