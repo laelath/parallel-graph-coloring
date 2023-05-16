@@ -224,7 +224,7 @@ impl<'a> ParallelColorableGraph for &'a CsrGraph<usize> {
 fn jones_plassmann<PCG, W>(graph: PCG, rho: &Vec<W>) -> Vec<usize>
 where
     PCG: ParallelColorableGraph,
-    W: PartialOrd + Send + Sync,
+    W: PartialOrd + Copy + Send + Sync,
 {
     struct JPData {
         colors: Vec<AtomicUsize>,
@@ -234,12 +234,27 @@ where
     fn jp_get_color<PCG, W>(graph: PCG, rho: &Vec<W>, data: &JPData, v: PCG::T) -> usize
     where
         PCG: ParallelColorableGraph,
-        W: PartialOrd + Send + Sync,
+        W: PartialOrd + Copy + Send + Sync,
     {
-        let mask = data.color_masks[PCG::to_index(v)].load(Ordering::Acquire);
-        if mask.count_zeros() > 0 {
+        let i = PCG::to_index(v);
+        let mask = data.color_masks[i].load(Ordering::Acquire);
+        if mask != usize::MAX {
             mask.trailing_ones() as usize
+        // Granularity is not beneficial it seems
+        //} else if graph.degree(v) < 0 {
+        //    let mut seen = vec![false; graph.degree(v) + 1];
+        //    for u in graph.iter_neighbors(v) {
+        //        let j = PCG::to_index(u);
+        //        if rho[j] > rho[i] {
+        //            let color = data.colors[j].load(Ordering::Acquire);
+        //            if let Some(c) = seen.get_mut(color) {
+        //                *c = true;
+        //            }
+        //        }
+        //    }
+        //    seen.iter().position(|b| !*b).unwrap()
         } else {
+            let rho_v = rho[i];
             let avail_colors: Vec<AtomicUsize> = (usize::BITS as usize..graph.degree(v) + 1)
                 .into_par_iter()
                 .map(AtomicUsize::new)
@@ -247,7 +262,7 @@ where
 
             graph
                 .par_iter_neighbors(v)
-                .filter(|u| rho[PCG::to_index(*u)] > rho[PCG::to_index(v)])
+                .filter(|u| rho[PCG::to_index(*u)] > rho_v)
                 .for_each(|u| {
                     let color = data.colors[PCG::to_index(u)].load(Ordering::Acquire);
                     if color >= usize::BITS as usize {
@@ -268,18 +283,20 @@ where
     fn jp_color<PCG, W>(graph: PCG, rho: &Vec<W>, data: &JPData, v: PCG::T)
     where
         PCG: ParallelColorableGraph,
-        W: PartialOrd + Send + Sync,
+        W: PartialOrd + Copy + Send + Sync,
     {
         let color = jp_get_color(graph, rho, data, v);
+        let rho_v = rho[PCG::to_index(v)];
         data.colors[PCG::to_index(v)].store(color, Ordering::Release);
         graph
             .par_iter_neighbors(v)
-            .filter(|u| rho[PCG::to_index(*u)] < rho[PCG::to_index(v)])
+            .filter(|u| rho[PCG::to_index(*u)] < rho_v)
             .for_each(|u| {
+                let j = PCG::to_index(u);
                 if let Some(mask) = 1_usize.checked_shl(color as u32) {
-                    data.color_masks[PCG::to_index(u)].fetch_or(mask, Ordering::SeqCst);
+                    data.color_masks[j].fetch_or(mask, Ordering::SeqCst);
                 }
-                if data.counters[PCG::to_index(u)].fetch_sub(1, Ordering::SeqCst) == 1 {
+                if data.counters[j].fetch_sub(1, Ordering::SeqCst) == 1 {
                     jp_color(graph, rho, data, u);
                 }
             });
@@ -300,10 +317,11 @@ where
     let counters: Vec<AtomicUsize> = graph
         .par_iter_vertices()
         .map(|v| {
+            let rho_v = rho[PCG::to_index(v)];
             AtomicUsize::new(
                 graph
                     .par_iter_neighbors(v)
-                    .filter(|u| rho[PCG::to_index(*u)] > rho[PCG::to_index(v)])
+                    .filter(|u| rho[PCG::to_index(*u)] > rho_v)
                     .count(),
             )
         })
@@ -318,9 +336,10 @@ where
     graph
         .par_iter_vertices()
         .filter(|v| {
+            let rho_v = rho[PCG::to_index(*v)];
             graph
                 .par_iter_neighbors(*v)
-                .filter(|u| rho[PCG::to_index(*u)] > rho[PCG::to_index(*v)])
+                .filter(|u| rho[PCG::to_index(*u)] > rho_v)
                 .count()
                 == 0
         })
